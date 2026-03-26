@@ -113,7 +113,7 @@ class CartesiaSpeaker:
         limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
 
         # ── ACTIVE: ElevenLabs client ─────────────────────────────────────────
-        self._elevenlabs_client  = httpx.AsyncClient(timeout=30, limits=limits, http2=True)
+        self._elevenlabs_client  = httpx.AsyncClient(timeout=30, limits=limits)
         self._elevenlabs_headers = {
             "xi-api-key":   self.elevenlabs_key,
             "Content-Type": "application/json",
@@ -126,7 +126,7 @@ class CartesiaSpeaker:
         #   3. Comment out _elevenlabs_client and _elevenlabs_headers above
         #   4. Swap _synthesise methods below
         #
-        # self._cartesia_client  = httpx.AsyncClient(timeout=30, limits=limits, http2=True)
+        # self._cartesia_client  = httpx.AsyncClient(timeout=30, limits=limits)
         # self._cartesia_headers = {
         #     "Authorization":    f"Bearer {self.cartesia_key}",
         #     "Cartesia-Version": "2025-04-16",
@@ -134,7 +134,7 @@ class CartesiaSpeaker:
         # }
 
         # Recall inject client
-        self._recall_client  = httpx.AsyncClient(timeout=30, limits=limits, http2=True)
+        self._recall_client  = httpx.AsyncClient(timeout=30, limits=limits)
         self._recall_headers = {
             "Authorization": f"Token {self.recall_key}",
             "Content-Type":  "application/json",
