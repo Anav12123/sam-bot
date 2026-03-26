@@ -87,6 +87,7 @@ RECALL_API_BASE = f"https://{RECALL_REGION}.recall.ai/api/v1"
 class CartesiaSpeaker:
     def __init__(self, bot_id: str = None):
         self.elevenlabs_key = os.environ["ELEVENLABS_API_KEY"]
+        print(f"[Speaker] ElevenLabs key: {self.elevenlabs_key[:8]}...{self.elevenlabs_key[-4:]} (len={len(self.elevenlabs_key)})")
         self.recall_key     = os.environ["RECALLAI_API_KEY"]
         # self.cartesia_key = os.environ["CARTESIA_API_KEY"]  # uncomment for Cartesia
         self.bot_id         = bot_id
