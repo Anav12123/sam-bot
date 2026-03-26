@@ -134,9 +134,52 @@ class CartesiaSpeaker:
             "accept":        "application/json",
         }
 
-    # ── ACTIVE: Cartesia Sonic-3 TTS ──────────────────────────────────────────
+    # ── ACTIVE: Cartesia Sonic-3 TTS (streaming) ─────────────────────────────
     async def _synthesise(self, text: str) -> bytes:
-        """Cartesia Sonic-3 — 90ms first byte, no server IP restrictions."""
+        """
+        Cartesia Sonic-3 streaming — collects full audio as fast as possible.
+        Uses streaming endpoint to minimise TTFB even though we collect all chunks.
+        Falls back to bytes endpoint if streaming fails.
+        """
+        try:
+            chunks = []
+            async with self._cartesia_client.stream(
+                "POST",
+                "https://api.cartesia.ai/tts/sse",
+                headers={**self._cartesia_headers, "Accept": "text/event-stream"},
+                json={
+                    "model_id":   CARTESIA_MODEL,
+                    "transcript": text,
+                    "voice":      {"mode": "id", "id": CARTESIA_VOICE_ID},
+                    "language":   "en",
+                    "output_format": {
+                        "container":   "mp3",
+                        "sample_rate": 44100,
+                        "bit_rate":    128000,
+                    },
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        import json as _json
+                        data = line[5:].strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        try:
+                            obj = _json.loads(data)
+                            if "data" in obj:
+                                import base64 as _b64
+                                chunks.append(_b64.b64decode(obj["data"]))
+                        except Exception:
+                            continue
+            if chunks:
+                return b"".join(chunks)
+        except Exception as e:
+            print(f"[Speaker] SSE stream failed: {e}, falling back to bytes endpoint")
+
+        # Fallback: bytes endpoint
         response = await self._cartesia_client.post(
             "https://api.cartesia.ai/tts/bytes",
             headers=self._cartesia_headers,
