@@ -1,11 +1,10 @@
 """
 Speaker.py
-ACTIVE TTS:   ElevenLabs eleven_flash_v2_5
-INACTIVE TTS: Cartesia Sonic-3 — commented out, uncomment to switch
+ACTIVE TTS:   Cartesia Sonic-3 (90ms, no server IP restrictions)
+INACTIVE TTS: ElevenLabs eleven_flash_v2_5 — commented out
+              (blocked on free tier from server IPs)
 
-NOISE MIXING: Commented out in _mix_noise usage in websocket_server.py
-  The _mix_noise function below is always available.
-  To re-enable: uncomment the noise block in websocket_server.py _process()
+NOISE MIXING: Commented out — re-enable in websocket_server.py _process()
 """
 
 import os
@@ -20,7 +19,6 @@ import hashlib
 # os.environ["FFPROBE_BINARY"] = r"C:\Users\user\Downloads\ffmpeg-8.1-full_build\bin\ffprobe.exe"
 
 # pydub only needed for noise mixing (disabled)
-# Import guarded so Railway/Python 3.13 doesn't crash
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
@@ -29,7 +27,6 @@ except ImportError:
     AudioSegment = None
 
 # ── Noise mixing — available but disabled ────────────────────────────────────
-# Re-enable in websocket_server.py by uncommenting the noise block in _process()
 NOISE_FILE   = "freesound_community-office-ambience-24734 (1).mp3"
 NOISE_SLICES = 20
 
@@ -37,11 +34,6 @@ NOISE_SLICES = 20
 def _mix_noise(voice_bytes: bytes, noise_slices: list, text: str) -> tuple[bytes, int]:
     if not PYDUB_AVAILABLE:
         return voice_bytes, len(voice_bytes) // 32
-    """
-    Mix voice with office ambience. Returns (bytes, duration_ms).
-    CURRENTLY UNUSED — disabled in websocket_server.py for speed.
-    Re-enable by uncommenting the noise block in _process().
-    """
     try:
         voice       = AudioSegment.from_file(io.BytesIO(voice_bytes)).fade_in(80)
         duration_ms = len(voice)
@@ -63,6 +55,8 @@ def _mix_noise(voice_bytes: bytes, noise_slices: list, text: str) -> tuple[bytes
 
 
 def get_duration_ms(audio_bytes: bytes) -> int:
+    if not PYDUB_AVAILABLE:
+        return int((len(audio_bytes) * 8) / (48 * 1000) * 1000)
     try:
         seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
         return len(seg)
@@ -70,14 +64,17 @@ def get_duration_ms(audio_bytes: bytes) -> int:
         return int((len(audio_bytes) * 8) / (48 * 1000) * 1000)
 
 
-# ── ElevenLabs config (ACTIVE) ────────────────────────────────────────────────
-ELEVENLABS_URL      = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-ELEVENLABS_MODEL    = "eleven_flash_v2_5"
-ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"  # George
+# ── Cartesia config (ACTIVE) ──────────────────────────────────────────────────
+CARTESIA_VOICE_ID = "79a125e8-cd45-4c13-8a67-188112f4dd22"  # British Narration Lady
+# Other voices:
+# "a0e99841-438c-4a64-b679-ae501e7d6091"  — Default
+# "694f9389-aac1-45b6-b726-9d9369183238"  — Barbershop Man (deep)
+CARTESIA_MODEL    = "sonic-3"   # sonic-3: 90ms | sonic-turbo: 40ms
 
-# ── Cartesia config (INACTIVE — uncomment to switch) ─────────────────────────
-# CARTESIA_VOICE_ID = "79a125e8-cd45-4c13-8a67-188112f4dd22"  # British Narration Lady
-# CARTESIA_MODEL    = "sonic-3"   # sonic-3: 90ms | sonic-turbo: 40ms
+# ── ElevenLabs config (INACTIVE — blocked on free tier from server IPs) ───────
+# ELEVENLABS_URL      = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+# ELEVENLABS_MODEL    = "eleven_flash_v2_5"
+# ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"  # George
 
 # ── Recall.ai config ──────────────────────────────────────────────────────────
 RECALL_REGION   = os.environ.get("RECALLAI_REGION", "ap-northeast-1")
@@ -86,11 +83,12 @@ RECALL_API_BASE = f"https://{RECALL_REGION}.recall.ai/api/v1"
 
 class CartesiaSpeaker:
     def __init__(self, bot_id: str = None):
-        self.elevenlabs_key = os.environ["ELEVENLABS_API_KEY"]
-        print(f"[Speaker] ElevenLabs key: {self.elevenlabs_key[:8]}...{self.elevenlabs_key[-4:]} (len={len(self.elevenlabs_key)})")
-        self.recall_key     = os.environ["RECALLAI_API_KEY"]
-        # self.cartesia_key = os.environ["CARTESIA_API_KEY"]  # uncomment for Cartesia
-        self.bot_id         = bot_id
+        self.cartesia_key = os.environ["CARTESIA_API_KEY"]
+        self.recall_key   = os.environ["RECALLAI_API_KEY"]
+        # self.elevenlabs_key = os.environ["ELEVENLABS_API_KEY"]  # uncomment to re-enable
+        self.bot_id       = bot_id
+
+        print(f"[Speaker] Cartesia key: {self.cartesia_key[:8]}...{self.cartesia_key[-4:]} (len={len(self.cartesia_key)})")
 
         # Noise slices — pre-loaded, not used until re-enabled
         base_dir   = os.path.dirname(os.path.abspath(__file__))
@@ -113,25 +111,19 @@ class CartesiaSpeaker:
 
         limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
 
-        # ── ACTIVE: ElevenLabs client ─────────────────────────────────────────
-        self._elevenlabs_client  = httpx.AsyncClient(timeout=30, limits=limits)
-        self._elevenlabs_headers = {
-            "xi-api-key":   self.elevenlabs_key,
-            "Content-Type": "application/json",
+        # ── ACTIVE: Cartesia client ───────────────────────────────────────────
+        self._cartesia_client  = httpx.AsyncClient(timeout=30, limits=limits)
+        self._cartesia_headers = {
+            "Authorization":    f"Bearer {self.cartesia_key}",
+            "Cartesia-Version": "2025-04-16",
+            "Content-Type":     "application/json",
         }
 
-        # ── INACTIVE: Cartesia client ─────────────────────────────────────────
-        # To switch to Cartesia:
-        #   1. Uncomment these lines
-        #   2. Uncomment cartesia_key above
-        #   3. Comment out _elevenlabs_client and _elevenlabs_headers above
-        #   4. Swap _synthesise methods below
-        #
-        # self._cartesia_client  = httpx.AsyncClient(timeout=30, limits=limits)
-        # self._cartesia_headers = {
-        #     "Authorization":    f"Bearer {self.cartesia_key}",
-        #     "Cartesia-Version": "2025-04-16",
-        #     "Content-Type":     "application/json",
+        # ── INACTIVE: ElevenLabs client ───────────────────────────────────────
+        # self._elevenlabs_client  = httpx.AsyncClient(timeout=30, limits=limits)
+        # self._elevenlabs_headers = {
+        #     "xi-api-key":   self.elevenlabs_key,
+        #     "Content-Type": "application/json",
         # }
 
         # Recall inject client
@@ -142,48 +134,49 @@ class CartesiaSpeaker:
             "accept":        "application/json",
         }
 
-    # ── ACTIVE: ElevenLabs TTS ────────────────────────────────────────────────
+    # ── ACTIVE: Cartesia Sonic-3 TTS ──────────────────────────────────────────
     async def _synthesise(self, text: str) -> bytes:
-        """ElevenLabs eleven_flash_v2_5 — ultra-realistic voice."""
-        payload = {
-            "text":     text,
-            "model_id": ELEVENLABS_MODEL,
-            "voice_settings": {
-                "stability":         0.35,
-                "similarity_boost":  0.75,
-                "style":             0.0,
-                "use_speaker_boost": True,
+        """Cartesia Sonic-3 — 90ms first byte, no server IP restrictions."""
+        response = await self._cartesia_client.post(
+            "https://api.cartesia.ai/tts/bytes",
+            headers=self._cartesia_headers,
+            json={
+                "model_id":   CARTESIA_MODEL,
+                "transcript": text,
+                "voice":      {"mode": "id", "id": CARTESIA_VOICE_ID},
+                "language":   "en",
+                "output_format": {
+                    "container":   "mp3",
+                    "sample_rate": 44100,
+                    "bit_rate":    128000,
+                },
             },
-            "output_format": "mp3_44100_64",
-        }
-        response = await self._elevenlabs_client.post(
-            ELEVENLABS_URL.format(voice_id=ELEVENLABS_VOICE_ID),
-            headers=self._elevenlabs_headers,
-            json=payload,
         )
         response.raise_for_status()
         return response.content
 
-    # ── INACTIVE: Cartesia TTS ────────────────────────────────────────────────
-    # To switch to Cartesia:
-    #   1. Comment out the ElevenLabs _synthesise above
+    # ── INACTIVE: ElevenLabs TTS ──────────────────────────────────────────────
+    # Blocked on free tier from server IPs — upgrade to paid to re-enable
+    # To switch back:
+    #   1. Comment out Cartesia _synthesise above
     #   2. Uncomment this method
+    #   3. Uncomment elevenlabs_key and _elevenlabs_client in __init__
     #
     # async def _synthesise(self, text: str) -> bytes:
-    #     """Cartesia Sonic-3 — 90ms first byte."""
-    #     response = await self._cartesia_client.post(
-    #         "https://api.cartesia.ai/tts/bytes",
-    #         headers=self._cartesia_headers,
+    #     """ElevenLabs eleven_flash_v2_5."""
+    #     response = await self._elevenlabs_client.post(
+    #         ELEVENLABS_URL.format(voice_id=ELEVENLABS_VOICE_ID),
+    #         headers=self._elevenlabs_headers,
     #         json={
-    #             "model_id":   CARTESIA_MODEL,
-    #             "transcript": text,
-    #             "voice":      {"mode": "id", "id": CARTESIA_VOICE_ID},
-    #             "language":   "en",
-    #             "output_format": {
-    #                 "container":   "mp3",
-    #                 "sample_rate": 44100,
-    #                 "bit_rate":    128000,
+    #             "text":     text,
+    #             "model_id": ELEVENLABS_MODEL,
+    #             "voice_settings": {
+    #                 "stability":         0.35,
+    #                 "similarity_boost":  0.75,
+    #                 "style":             0.0,
+    #                 "use_speaker_boost": True,
     #             },
+    #             "output_format": "mp3_44100_64",
     #         },
     #     )
     #     response.raise_for_status()
@@ -206,7 +199,7 @@ class CartesiaSpeaker:
 
     async def close(self):
         await asyncio.gather(
-            self._elevenlabs_client.aclose(),
+            self._cartesia_client.aclose(),
             self._recall_client.aclose(),
-            # self._cartesia_client.aclose(),  # uncomment if Cartesia re-enabled
+            # self._elevenlabs_client.aclose(),  # uncomment if ElevenLabs re-enabled
         )
