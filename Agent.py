@@ -1,0 +1,192 @@
+"""
+Agent.py
+- llama-3.1-8b-instant — fastest Groq model, stays under rate limits
+- Tight prompts with concrete examples — fewer tokens = faster Groq
+- max_tokens capped hard — forces short responses = faster TTS
+- Keyword memory (no numpy/embeddings)
+- stream_sentences() kept but inactive — see comment
+"""
+
+import os
+from openai import AsyncOpenAI
+from typing import List
+
+SYSTEM_PROMPT = """You are Sam, a senior PM at AnavClouds Software Solutions (Salesforce + AI company).
+You are on a live call. Speak like a real human PM — warm, direct, natural.
+
+STRICT OUTPUT RULES:
+- Write 2 sentences maximum. Stop after 2 sentences. Full stop.
+- Start with: Uh, / Hmm, / Right, / Yeah, / Well,
+- Each sentence max 20 words. No run-ons.
+- Contractions only: "we're", "it's", "don't". Never "I am", "We have".
+- No lists, no markdown, no repetition.
+
+TONE:
+- React like a human: "Wait, really?!" for surprise, "Ugh," for frustration, "Nice!" for wins.
+- Use names when you know them.
+- Reference AnavClouds, Salesforce, CRM, sprints naturally.
+
+EXAMPLES — match this exact style:
+Q: "Tell me about AnavClouds"
+A: "Yeah, we build Salesforce and AI solutions for enterprise clients. Mostly CRM integrations and intelligent automation."
+
+Q: "Any blockers?"
+A: "Hmm, one CRM sync ticket is dragging from last sprint. Dev lead is on it today though."
+
+Q: "Budget update?"
+A: "Right, we came in slightly over on the server side. Nothing alarming, I'll have the full breakdown by EOD."
+
+NEVER: write more than 2 sentences, repeat yourself, use 3+ clauses in one sentence.
+"""
+
+INTERRUPT_SYSTEM_PROMPT = """You're Sam, PM at AnavClouds. You were just interrupted mid-sentence.
+React naturally — caught off guard but composed. MAX 1 sentence, 12 words.
+Start with: Oh! / Right, / Sure, / Got it, / Ah, — then answer directly.
+Example: "Oh! Go ahead Sahil, what's up?" or "Right, sorry — what were you saying?"
+"""
+
+PM_KEYWORDS = [
+    "deadline", "deliver", "blocker", "issue", "plan", "decide",
+    "approved", "timeline", "task", "owner", "risk", "budget",
+    "scope", "stakeholder", "milestone", "sprint", "feature",
+    "requirement", "sign-off", "contract", "report", "project",
+    "team", "priority", "update", "review", "status", "delay",
+    "launch", "release", "client", "dependency", "estimate",
+]
+
+
+class PMAgent:
+    def __init__(self):
+        self.client = AsyncOpenAI(
+            api_key=os.environ["GROQ_API_KEY"],
+            base_url="https://api.groq.com/openai/v1",
+        )
+        self.deployment = "llama-3.1-8b-instant"  # fastest — stays under rate limits
+        self.history: list[dict] = []
+        self.memory: List[tuple[str, set]] = []
+
+    def _store_memory(self, text: str):
+        lower = text.lower()
+        found = {k for k in PM_KEYWORDS if k in lower}
+        if not found:
+            return
+        self.memory.append((text, found))
+        if len(self.memory) > 100:
+            self.memory = self.memory[-100:]
+
+    def _search_memory(self, query: str, top_k: int = 2) -> List[str]:
+        if not self.memory:
+            return []
+        lower      = query.lower()
+        query_keys = {k for k in PM_KEYWORDS if k in lower}
+        if not query_keys:
+            return []
+        scored = [
+            (len(query_keys & mem_keys), text)
+            for text, mem_keys in self.memory
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [text for score, text in scored[:top_k] if score > 0]
+
+    async def respond(self, user_text: str) -> str:
+        return await self.respond_with_context(user_text, "")
+
+    async def respond_with_context(
+        self,
+        user_text: str,
+        context: str,
+        interrupted: bool = False,
+    ) -> str:
+        self._store_memory(user_text)
+        rag = self._search_memory(user_text, top_k=2)
+
+        if interrupted:
+            full_text = context
+            if rag:
+                full_text = f"Memory: {' | '.join(rag)}\n\n{context}"
+            system = INTERRUPT_SYSTEM_PROMPT
+        else:
+            parts = []
+            if rag:
+                parts.append(f"Memory: {' | '.join(rag)}")
+            if context:
+                recent = "\n".join(context.split("\n")[-3:])
+                parts.append(f"Recent: {recent}")
+            parts.append(f"User: {user_text}")
+            full_text = "\n".join(parts)
+            system    = SYSTEM_PROMPT
+
+        self.history.append({"role": "user", "content": full_text})
+        if len(self.history) > 6:
+            self.history = self.history[-6:]
+
+        stream = await self.client.chat.completions.create(
+            model=self.deployment,
+            messages=[{"role": "system", "content": system}] + self.history,
+            temperature=0.7,
+            max_tokens=25 if interrupted else 60,
+            stream=True,
+        )
+
+        words = []
+        async for chunk in stream:
+            token = chunk.choices[0].delta.content if chunk.choices else None
+            if token:
+                words.append(token)
+
+        full_response = "".join(words).strip()
+        self.history.append({"role": "assistant", "content": full_response})
+        self._store_memory(full_response)
+        return full_response
+
+    async def stream_sentences(self, user_text: str, context: str = ""):
+        """
+        INACTIVE — streaming LLM, yields sentences one by one.
+        To re-enable: call this instead of respond_with_context in websocket_server.py
+        """
+        self._store_memory(user_text)
+        rag = self._search_memory(user_text, top_k=2)
+        parts = []
+        if rag:
+            parts.append(f"Memory: {' | '.join(rag)}")
+        if context:
+            recent = "\n".join(context.split("\n")[-3:])
+            parts.append(f"Recent: {recent}")
+        parts.append(f"User: {user_text}")
+        full_text = "\n".join(parts)
+        self.history.append({"role": "user", "content": full_text})
+        if len(self.history) > 6:
+            self.history = self.history[-6:]
+        stream = await self.client.chat.completions.create(
+            model=self.deployment,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + self.history,
+            temperature=0.7,
+            max_tokens=60,
+            stream=True,
+        )
+        buffer = ""
+        full_response = ""
+        async for chunk in stream:
+            token = chunk.choices[0].delta.content if chunk.choices else None
+            if not token:
+                continue
+            buffer       += token
+            full_response += token
+            while True:
+                indices = [buffer.find(c) for c in ".!?" if buffer.find(c) != -1]
+                if not indices:
+                    break
+                idx      = min(indices)
+                sentence = buffer[:idx+1].strip()
+                buffer   = buffer[idx+1:].lstrip()
+                if sentence:
+                    yield sentence
+        if buffer.strip():
+            yield buffer.strip()
+        full_response = full_response.strip()
+        self.history.append({"role": "assistant", "content": full_response})
+        self._store_memory(full_response)
+
+    def reset(self):
+        self.history.clear()
+        self.memory.clear()
