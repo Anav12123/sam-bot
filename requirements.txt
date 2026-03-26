@@ -1,6 +1,7 @@
 aiohttp
-httpx
+httpx[http2]
 python-dotenv
 openai
 groq
 pydub
+h2
