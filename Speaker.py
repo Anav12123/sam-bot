@@ -69,7 +69,7 @@ CARTESIA_VOICE_ID = "79a125e8-cd45-4c13-8a67-188112f4dd22"  # British Narration 
 # Other voices:
 # "a0e99841-438c-4a64-b679-ae501e7d6091"  — Default
 # "694f9389-aac1-45b6-b726-9d9369183238"  — Barbershop Man (deep)
-CARTESIA_MODEL    = "sonic-3"   # sonic-3: 90ms | sonic-turbo: 40ms
+CARTESIA_MODEL    = "sonic-turbo"   # sonic-turbo: 40ms first byte, optimised for conversation
 
 # ── ElevenLabs config (INACTIVE — blocked on free tier from server IPs) ───────
 # ELEVENLABS_URL      = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -134,57 +134,9 @@ class CartesiaSpeaker:
             "accept":        "application/json",
         }
 
-    # ── ACTIVE: Cartesia Sonic-3 TTS (SSE streaming → MP3 via bytes) ─────────
+    # ── ACTIVE: Cartesia Sonic-3 TTS ──────────────────────────────────────────
     async def _synthesise(self, text: str) -> bytes:
-        """
-        Cartesia Sonic-3 — SSE stream collects raw PCM chunks, then
-        falls back to bytes endpoint which returns full MP3.
-        SSE gives lower latency by starting generation immediately.
-        """
-        import json as _json
-        import base64 as _b64
-
-        chunks = []
-        try:
-            async with self._cartesia_client.stream(
-                "POST",
-                "https://api.cartesia.ai/tts/sse",
-                headers=self._cartesia_headers,
-                json={
-                    "model_id":   CARTESIA_MODEL,
-                    "transcript": text,
-                    "voice":      {"mode": "id", "id": CARTESIA_VOICE_ID},
-                    "language":   "en",
-                    "output_format": {
-                        "container":   "raw",
-                        "encoding":    "pcm_f32le",
-                        "sample_rate": 44100,
-                    },
-                },
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        obj = _json.loads(data)
-                        if obj.get("type") == "chunk" and "data" in obj:
-                            chunks.append(_b64.b64decode(obj["data"]))
-                    except Exception:
-                        continue
-
-            if chunks:
-                # Got raw PCM — convert to MP3 for Recall inject
-                raw_pcm = b"".join(chunks)
-                return await self._pcm_to_mp3(raw_pcm, sample_rate=44100)
-
-        except Exception as e:
-            print(f"[Speaker] SSE failed ({e}), using bytes endpoint")
-
-        # Fallback: bytes endpoint returns MP3 directly
+        """Cartesia Sonic-3 bytes endpoint."""
         response = await self._cartesia_client.post(
             "https://api.cartesia.ai/tts/bytes",
             headers=self._cartesia_headers,
@@ -202,42 +154,6 @@ class CartesiaSpeaker:
         )
         response.raise_for_status()
         return response.content
-
-    async def _pcm_to_mp3(self, pcm_bytes: bytes, sample_rate: int = 44100) -> bytes:
-        """Convert raw f32le PCM to MP3 using ffmpeg subprocess."""
-        import asyncio
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-f", "f32le", "-ar", str(sample_rate), "-ac", "1",
-            "-i", "pipe:0",
-            "-f", "mp3", "-b:a", "128k",
-            "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await proc.communicate(input=pcm_bytes)
-        if proc.returncode == 0 and stdout:
-            return stdout
-        # ffmpeg failed — return raw PCM wrapped in WAV header as fallback
-        return self._pcm_to_wav(pcm_bytes, sample_rate)
-
-    def _pcm_to_wav(self, pcm_bytes: bytes, sample_rate: int = 44100) -> bytes:
-        """Wrap raw f32le PCM in a WAV header as last resort."""
-        import struct
-        num_channels   = 1
-        bits_per_sample = 32
-        byte_rate      = sample_rate * num_channels * bits_per_sample // 8
-        block_align    = num_channels * bits_per_sample // 8
-        data_size      = len(pcm_bytes)
-        header = struct.pack(
-            "<4sI4s4sIHHIIHH4sI",
-            b"RIFF", 36 + data_size, b"WAVE",
-            b"fmt ", 16, 3, num_channels,
-            sample_rate, byte_rate, block_align, bits_per_sample,
-            b"data", data_size,
-        )
-        return header + pcm_bytes
 
     # ── INACTIVE: ElevenLabs TTS ──────────────────────────────────────────────
     # Blocked on free tier from server IPs — upgrade to paid to re-enable
